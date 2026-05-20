@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>網路設備自動備份系統 WebUI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        html, body { height: 100%; margin: 0; overflow: hidden; background-color: #f8f9fa; }
+        body { display: flex; flex-direction: column; }
+        .navbar { flex-shrink: 0; }
+        .main-wrapper { flex: 1; display: flex; overflow: hidden; padding: 0 10px 15px 10px; }
+        .column-left, .column-right { width: 50%; height: 100%; overflow-y: auto; padding: 0 10px; }
+        .column-right { display: flex; flex-direction: column; }
+        .terminal-card { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .terminal-box {
+            flex: 1; background-color: #1e1e1e; color: #00ff00;
+            font-family: 'Consolas', 'Courier New', monospace;
+            overflow-y: auto; padding: 15px; border-radius: 0 0 5px 5px;
+            box-shadow: inset 0 0 10px #000;
+        }
+        
+		.skipped-row { opacity: 0.5; text-decoration: line-through; }
+        .skipped-row button { text-decoration: none !important; opacity: 1; } /* 確保按鈕文字正常且清晰 */
+		
+		/* ================= 加大狀態文字與徽章 ================= */
+        .status-cell .badge {
+            font-size: 1.1rem;       /* 字體放大 (預設大約是 0.75em) */
+            padding: 0.4em 0.6em;    /* 徽章內縮放一點，讓字不會太擠 */
+            font-weight: bold;       /* 加粗字體 */
+            box-shadow: 1px 1px 3px rgba(0,0,0,0.2); /* 加一點點陰影增加立體感 */
+        }
+		
+		/* ================= 強烈高亮與動態效果 ================= */
+        .running-row {
+            background-color: #cff4fc !important; /* 亮藍色背景 */
+            animation: pulse-border 1.5s infinite; /* 呼吸燈效果 */
+            font-weight: bold;
+        }
+        
+		@keyframes pulse-border {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.01); box-shadow: 0 0 10px rgba(13, 202, 240, 0.5); }
+            100% { transform: scale(1); }
+        }
+		
+		/* ================= 修改：表格標題顏色與防透光 ================= */
+        thead.position-sticky th {
+            background-color: #d3d9df !important; /* 改成深一點的灰藍色，更容易辨識 */
+            color: #000;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15); /* 增加下方陰影區隔 */
+            border-bottom: 2px solid #aab3bc;
+        }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark bg-dark mb-3">
+    <div class="container-fluid d-flex justify-content-between align-items-center">
+        <span class="navbar-brand mb-0 h1">🛡️ 網路設備自動備份系統 {{ version }}</span>
+        <button class="btn btn-outline-info btn-sm fw-bold" data-bs-toggle="modal" data-bs-target="#backupListModal" onclick="loadBackups()">
+            📂 歷史備份預覽
+        </button>
+    </div>
+</nav>
+
+<div class="main-wrapper">
+    <div class="column-left">
+        <div class="card shadow-sm h-100 d-flex flex-column">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center flex-shrink-0">
+                <h5 class="mb-0">設備清單 (CSV)</h5>
+                <div>
+                    <button class="btn btn-info btn-sm fw-bold text-white me-2" id="btn-edit-csv" data-bs-toggle="modal" data-bs-target="#editCsvModal" onclick="loadCsvContent()">
+                        📝 編輯清單
+                    </button>
+                    <button class="btn btn-warning btn-sm fw-bold me-1" id="btn-backup-all" onclick="startBackup('all')">
+                        ⚡ 一鍵全部備份
+                    </button>
+                    <button class="btn btn-danger btn-sm fw-bold d-none me-1" id="btn-cancel-backup" onclick="cancelBackup()">
+                        🛑 中斷備份
+                    </button>
+                    <button class="btn btn-danger btn-sm fw-bold border border-white" onclick="closeApp()">
+                        ❌ 結束程式
+                    </button>
+                </div>
+            </div>
+            
+            <div class="card-body p-0" style="overflow-y: auto;">
+                <table class="table table-hover table-striped mb-0">
+                    <thead class="position-sticky" style="top: 0; z-index: 1010;">
+                        <tr>
+                            <th>#</th>
+                            <th>IP 位址</th>
+                            <th>設備類型</th>
+                            <th style="width: 120px;">狀態</th>
+							<th style="width: 150px;" class="text-center">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="device-table-body">
+                        <tr><td colspan="5" class="text-center">載入中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="column-right">
+        <div class="card shadow-sm terminal-card">
+            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">即時監控面板</h5>
+                <span id="status-badge" class="badge bg-secondary">待命中</span>
+            </div>
+            <div id="terminal" class="terminal-box">
+                歡迎使用網路設備備份系統...<br>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="backupListModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-secondary text-white">
+                <h5 class="modal-title">📂 歷史備份清單</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body bg-light">
+                <div class="accordion" id="backupAccordion">
+                    <div class="text-center py-4">載入中...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="filePreviewModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-dark text-white">
+                <h5 class="modal-title" id="previewTitle">📄 檔案預覽</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0 bg-dark text-light">
+                <pre id="fileContent" class="m-0 p-3" style="white-space: pre-wrap; font-family: Consolas, monospace; font-size: 14px;"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="editCsvModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-info text-white">
+                <h5 class="modal-title text-dark fw-bold">📝 編輯設備清單 (devices.csv)</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body bg-light p-3">
+                <div class="alert alert-secondary py-2 mb-3 d-flex justify-content-between align-items-center" style="font-size: 0.9rem;">
+                    <div>
+                        💡 <strong>提示：</strong>直接在表格修改資料，程式會自動轉為 CSV 格式。<br>
+                        若要暫時略過某台設備，請在「IP 位址」開頭加上 <code>#</code>。
+                    </div>
+                    <button class="btn btn-success btn-sm fw-bold shadow-sm" onclick="addCsvRow()">
+                        ➕ 新增設備
+                    </button>
+                </div>
+                <div class="table-responsive bg-white border rounded shadow-sm" style="height: 400px;">
+                    <table class="table table-sm table-hover mb-0 align-middle">
+                        <thead class="table-dark position-sticky top-0" style="z-index: 1;">
+                            <tr>
+                                <th>IP 位址</th>
+                                <th>帳號</th>
+                                <th>密碼</th>
+                                <th>Enable 密碼</th>
+                                <th>設備類型</th>
+                                <th class="text-center" style="width: 50px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="csvTableBody">
+                            </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary fw-bold" onclick="saveCsvContent()">💾 儲存並重新載入</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="customAlertModal" tabindex="-1" aria-hidden="true" style="z-index: 9999;">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content border-danger border-3 shadow-lg">
+            <div class="modal-header bg-danger text-white py-2">
+                <h5 class="modal-title fw-bold">⚠️ 系統操作提示</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body text-center p-4 bg-white">
+                <p id="customAlertMessage" class="fs-4 fw-bold text-danger mb-0" style="line-height: 1.6;">
+                    </p>
+            </div>
+            <div class="modal-footer justify-content-center bg-light py-2">
+                <button type="button" class="btn btn-secondary btn-lg fw-bold px-5 shadow-sm" data-bs-dismiss="modal">確定</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    let logIndex = 0;
+    let activeRowIp = null; // 紀錄目前畫面上亮起的 IP
+    let isSystemRunning = false; // 核心狀態防呆鎖
+    
+    // 載入設備清單
+    async function loadDevices() {
+        try {
+            const res = await fetch('/api/devices');
+            const devices = await res.json();
+            const tbody = document.getElementById('device-table-body');
+            tbody.innerHTML = '';
+            
+            devices.forEach((dev, idx) => {
+                const isSkipped = dev.ip.startsWith('#');
+                const cleanIp = dev.ip.replace('#', '');
+                const rowClass = isSkipped ? 'skipped-row' : '';
+                const statusStr = isSkipped ? '<span class="badge bg-warning">跳過</span>' : '<span class="badge bg-success">啟用</span>';
+                
+                tbody.innerHTML += `
+                    <tr class="${rowClass}" data-ip="${cleanIp}">
+                        <td>${idx + 1}</td>
+                        <td class="fw-bold">${cleanIp}</td>
+                        <td>${dev.device_type || ''}</td>
+                        <td class="status-cell">${statusStr}</td>
+                        <td class="text-end">
+                            <button class="btn ${isSkipped ? 'btn-outline-warning fw-bold' : 'btn-outline-primary'} btn-sm btn-single-backup" onclick="startBackup('${cleanIp}')">
+                                ${isSkipped ? '強制備份' : '單機備份'}
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+        } catch (e) {
+            document.getElementById('device-table-body').innerHTML = '<tr><td colspan="5" class="text-danger text-center">無法載入 CSV。</td></tr>';
+        }
+    }
+
+    // 啟動備份
+    async function startBackup(target) {
+        if (isSystemRunning) {
+            console.warn("[防呆攔截] 系統正在執行備份中，拒絕重複觸發請求。");
+            return;
+        }
+        try {
+            const res = await fetch('/api/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target: target})
+            });
+            const data = await res.json();
+            if(data.status === 'error') alert(data.message);
+            else { logIndex = 0; document.getElementById('terminal').innerHTML = ''; }
+        } catch(e) { alert("請求失敗！"); }
+    }
+
+    // 中斷備份
+    async function cancelBackup() {
+        try {
+            const res = await fetch('/api/cancel', { method: 'POST' });
+            const data = await res.json();
+            if(data.status === 'error') alert(data.message);
+        } catch(e) { alert("無法連線到伺服器發送中斷訊號。"); }
+    }
+
+    // 定期輪詢日誌與 UI 更新
+    async function pollLogs() {
+        try {
+            const res = await fetch('/api/logs');
+            const data = await res.json();
+            
+            const badge = document.getElementById('status-badge');
+            const btnAll = document.getElementById('btn-backup-all');
+            const btnCancel = document.getElementById('btn-cancel-backup');
+            const btnEdit = document.getElementById('btn-edit-csv');
+            const singleBtns = document.querySelectorAll('.btn-single-backup');
+            
+            if(data.is_running) {
+                // 修改狀態旗標為「執行中」
+                isSystemRunning = true;
+                
+                badge.className = 'badge bg-primary text-white border-0 spinner-grow spinner-grow-sm';
+                badge.innerText = ' 執行中...';
+                
+                btnAll.classList.add('d-none');
+                btnCancel.classList.remove('d-none');
+                
+                if(btnEdit) btnEdit.setAttribute('disabled', 'true');
+                singleBtns.forEach(btn => btn.setAttribute('disabled', 'true'));
+                
+                if (data.device_status) {
+                    Object.keys(data.device_status).forEach(ip => {
+                        const row = document.querySelector(`tr[data-ip="${ip}"]`);
+                        if (row) {
+                            const statusCell = row.querySelector('.status-cell');
+                            const status = data.device_status[ip];
+                            
+                            if (status === 'success') {
+                                row.classList.remove('running-row');
+                                statusCell.innerHTML = '<span class="badge bg-success">✔️ 成功</span>';
+                            } else if (status === 'fail') {
+                                row.classList.remove('running-row');
+                                statusCell.innerHTML = '<span class="badge bg-danger">❌ 失敗</span>';
+                            } else if (status === 'running') {
+                                row.classList.add('running-row');
+                                statusCell.innerHTML = '<span class="badge bg-primary"><span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 備份中</span>';
+                                
+                                if (activeRowIp !== ip) {
+                                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                    activeRowIp = ip;
+                                }
+                            } else if (status === 'waiting') {
+                                row.classList.remove('running-row');
+                                statusCell.innerHTML = '<span class="badge bg-secondary">⏳ 等待中</span>';
+                            } else if (status === 'skipped') {
+                                row.classList.remove('running-row');
+                                statusCell.innerHTML = '<span class="badge bg-warning">⏭️ 跳過</span>';
+                            }
+                        }
+                    });
+                }
+                
+            } else {
+                // 👇【關鍵修改】如果原本是「執行中」，現在突然停下來了（被使用者點擊中斷，或是全部任務正常執行結束）
+                if (isSystemRunning) {
+                    loadDevices(); // ⚡ 精準觸發一次：立刻重新拉取設備清單，洗掉所有打勾打叉，回歸預設的「啟用」與「跳過」狀態！
+                }
+                isSystemRunning = false; // 重設核心狀態為未執行
+                
+                badge.className = 'badge bg-secondary';
+                badge.innerText = '待命中';
+                
+                btnAll.classList.remove('d-none');
+                btnCancel.classList.add('d-none');
+                
+                if(btnEdit) btnEdit.removeAttribute('disabled');
+                singleBtns.forEach(btn => btn.removeAttribute('disabled'));
+                
+                if (activeRowIp) {
+                    const lastRow = document.querySelector(`tr[data-ip="${activeRowIp}"]`);
+                    if (lastRow) lastRow.classList.remove('running-row');
+                    activeRowIp = null;
+                }
+            }
+            
+            // 處理 Terminal 顯示
+            const term = document.getElementById('terminal');
+            let hasNewLog = false;
+            for(let i = logIndex; i < data.logs.length; i++) {
+                term.innerHTML += data.logs[i] + '<br>';
+                hasNewLog = true;
+            }
+            logIndex = data.logs.length;
+            if(hasNewLog) term.scrollTop = term.scrollHeight;
+        } catch(e) {}
+    }
+
+    // 歷史備份清單與預覽功能
+    async function loadBackups() { 
+        const acc = document.getElementById('backupAccordion');
+        acc.innerHTML = '<div class="text-center py-4">載入中...</div>';
+        try {
+            const res = await fetch('/api/backups');
+            const data = await res.json();
+            acc.innerHTML = '';
+            if (data.length === 0) {
+                acc.innerHTML = '<div class="alert alert-info mt-3">目前尚無備份紀錄。</div>';
+                return;
+            }
+            data.forEach((item, index) => {
+                let fileListHtml = '<ul class="list-group list-group-flush">';
+                if (item.files.length === 0) fileListHtml += '<li class="list-group-item text-muted">資料夾為空</li>';
+                else {
+                    item.files.forEach(file => {
+                        fileListHtml += `
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                <span class="fw-bold">${file}</span>
+                                <button class="btn btn-sm btn-dark" onclick="previewFile('${item.folder}', '${file}')">📄 預覽</button>
+                            </li>
+                        `;
+                    });
+                }
+                fileListHtml += '</ul>';
+                acc.innerHTML += `
+                    <div class="accordion-item shadow-sm mb-2 border-0">
+                        <h2 class="accordion-header" id="heading${index}">
+                            <button class="accordion-button ${index === 0 ? '' : 'collapsed'} bg-light fw-bold" type="button" data-bs-toggle="collapse" data-bs-target="#collapse${index}">
+                                🕒 ${item.folder}
+                            </button>
+                        </h2>
+                        <div id="collapse${index}" class="accordion-collapse collapse ${index === 0 ? 'show' : ''}" data-bs-parent="#backupAccordion">
+                            <div class="accordion-body p-0">${fileListHtml}</div>
+                        </div>
+                    </div>
+                `;
+            });
+        } catch(e) { acc.innerHTML = '<div class="alert alert-danger mt-3">讀取失敗。</div>'; }
+    }
+    
+    async function previewFile(folder, filename) {
+        document.getElementById('previewTitle').innerText = `📄 ${filename}`;
+        document.getElementById('fileContent').innerText = '讀取中...';
+        const previewModal = new bootstrap.Modal(document.getElementById('filePreviewModal'));
+        previewModal.show();
+        try {
+            const res = await fetch(`/api/backup_content?folder=${folder}&filename=${filename}`);
+            const data = await res.json();
+            document.getElementById('fileContent').innerText = data.error ? `[錯誤] ${data.error}` : data.content;
+        } catch (e) { document.getElementById('fileContent').innerText = `[網路錯誤] 無法讀取檔案。`; }
+    }
+
+    // === 載入 CSV 並轉為表格 ===
+    async function loadCsvContent() {
+        const tbody = document.getElementById('csvTableBody');
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center py-4">讀取中...</td></tr>';
+        
+        try {
+            const res = await fetch('/api/csv');
+            const data = await res.json();
+            
+            if(data.error) {
+                tbody.innerHTML = `<tr><td colspan="6" class="text-danger text-center">讀取錯誤: ${data.error}</td></tr>`;
+                return;
+            }
+            
+            tbody.innerHTML = '';
+            const lines = data.content.split('\n');
+            let isFirst = true;
+            
+            lines.forEach(line => {
+                if (!line.trim()) return; 
+                if (isFirst) { isFirst = false; return; } 
+                
+                const cols = line.split(',');
+                appendRow(cols[0] || '', cols[1] || '', cols[2] || '', cols[3] || '', cols[4] || '');
+            });
+            
+            if (tbody.innerHTML === '') appendRow('', '', '', '', '');
+            
+            const tableContainer = document.querySelector('#editCsvModal .table-responsive');
+            if (tableContainer) {
+                tableContainer.scrollTop = 0;
+            }
+			
+        } catch(e) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">無法連線到伺服器讀取檔案。</td></tr>';
+        }
+    }
+
+    // === 動態新增一列 ===
+    function appendRow(ip, user, pwd, secret, type, autoScroll = false) {
+        const tbody = document.getElementById('csvTableBody');
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td><input type="text" class="form-control form-control-sm csv-ip" value="${ip}" placeholder="192.168.x.x"></td>
+            <td><input type="text" class="form-control form-control-sm csv-user" value="${user}"></td>
+            <td><input type="text" class="form-control form-control-sm csv-pwd" value="${pwd}"></td>
+            <td><input type="text" class="form-control form-control-sm csv-secret" value="${secret}"></td>
+            <td><input type="text" class="form-control form-control-sm csv-type" value="${type}" placeholder="cisco_ios"></td>
+            <td class="text-center">
+                <button class="btn btn-sm btn-outline-danger py-0 px-2" onclick="this.closest('tr').remove()" title="刪除此筆">✖</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+        if (autoScroll) {
+            tr.scrollIntoView({behavior: "smooth", block: "nearest"});
+        }
+    }
+
+    // === 點擊按鈕新增空白列 ===
+    function addCsvRow() {
+        appendRow('', '', '', '', '', true);
+    }
+
+    // === 將表格內容組裝回 CSV 並儲存 ===
+    async function saveCsvContent() {
+        const rows = document.querySelectorAll('#csvTableBody tr');
+        let csvString = 'ip,username,password,secret,device_type\n'; 
+        
+        rows.forEach(tr => {
+            const ip = tr.querySelector('.csv-ip').value.trim();
+            const user = tr.querySelector('.csv-user').value.trim();
+            const pwd = tr.querySelector('.csv-pwd').value.trim();
+            const secret = tr.querySelector('.csv-secret').value.trim();
+            const type = tr.querySelector('.csv-type').value.trim();
+            
+            if (ip) {
+                csvString += `${ip},${user},${pwd},${secret},${type}\n`;
+            }
+        });
+        
+        try {
+            const res = await fetch('/api/csv', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({content: csvString})
+            });
+            const data = await res.json();
+            
+            if(data.status === 'success') {
+                const modalEl = document.getElementById('editCsvModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                modal.hide();
+                loadDevices(); 
+            } else { 
+                alert(data.message); 
+            }
+        } catch(e) { 
+            alert("儲存請求失敗，請檢查網路狀態。"); 
+        }
+    }
+
+    // 初始化
+    loadDevices();
+    setInterval(pollLogs, 1000); 
+	
+	// === 關閉整個應用程式 ===
+    async function closeApp() {
+        try {
+            const res = await fetch('/api/logs');
+            const data = await res.json();
+            
+            if (data.is_running) {
+                const alertMsg = "⚠️ 系統正在執行備份任務中！<br>請先點擊「🛑 中斷備份」，<br>等待任務停止後再關閉程式。";
+                document.getElementById('customAlertMessage').innerHTML = alertMsg;
+                const myModal = new bootstrap.Modal(document.getElementById('customAlertModal'));
+                myModal.show();
+                return; 
+            }
+            
+            fetch('/api/shutdown', { method: 'POST' }).catch(() => {
+                console.log("程式已關閉");
+            });
+        } catch (e) {
+            console.error("檢查程式狀態失敗", e);
+            fetch('/api/shutdown', { method: 'POST' }).catch(() => {});
+        }
+    }
+</script>
+
+</body>
+</html>
